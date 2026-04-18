@@ -2,6 +2,7 @@ import type {
   AgentId,
   AgentPayload,
   LoginPayload,
+  PromptRecord,
   ProviderRecord,
 } from "@shared/types";
 
@@ -101,4 +102,43 @@ export function activateProvider(
       body: JSON.stringify({}),
     },
   );
+}
+
+export function createPrompt(
+  agent: AgentId,
+  prompt: PromptRecord,
+): Promise<AgentPayload> {
+  return request<AgentPayload>(`/api/agents/${agent}/prompts`, {
+    method: "POST",
+    body: JSON.stringify({ prompt }),
+  });
+}
+
+export function updatePrompt(
+  agent: AgentId,
+  prompt: PromptRecord,
+): Promise<AgentPayload> {
+  return request<AgentPayload>(`/api/agents/${agent}/prompts/${prompt.id}`, {
+    method: "PUT",
+    body: JSON.stringify({ prompt }),
+  });
+}
+
+export function removePrompt(
+  agent: AgentId,
+  promptId: string,
+): Promise<AgentPayload> {
+  return request<AgentPayload>(`/api/agents/${agent}/prompts/${promptId}`, {
+    method: "DELETE",
+  });
+}
+
+export function activatePrompt(
+  agent: AgentId,
+  promptId: string,
+): Promise<AgentPayload> {
+  return request<AgentPayload>(`/api/agents/${agent}/prompts/${promptId}/switch`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }

@@ -34,9 +34,19 @@ export interface ProviderRecord {
   meta?: ProviderMeta;
 }
 
+export interface PromptRecord {
+  id: string;
+  name: string;
+  content: string;
+  createdAt?: number;
+  sortIndex?: number;
+}
+
 export interface AgentConfig {
   providers: Record<string, ProviderRecord>;
   current: string;
+  prompts: Record<string, PromptRecord>;
+  currentPrompt: string;
 }
 
 export interface SwitchConfigFile {
@@ -49,6 +59,8 @@ export interface AgentPayload {
   agent: AgentId;
   providers: ProviderRecord[];
   currentProviderId: string;
+  prompts: PromptRecord[];
+  currentPromptId: string;
 }
 
 export interface LoginPayload {
@@ -64,5 +76,17 @@ export interface DeleteProviderPayload {
 }
 
 export interface SwitchProviderPayload {
+  id: string;
+}
+
+export interface SavePromptPayload {
+  prompt: PromptRecord;
+}
+
+export interface DeletePromptPayload {
+  id: string;
+}
+
+export interface SwitchPromptPayload {
   id: string;
 }

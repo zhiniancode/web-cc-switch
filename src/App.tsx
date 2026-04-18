@@ -7,19 +7,30 @@ import {
 } from "react";
 import { LogOut, RefreshCw, ShieldCheck } from "lucide-react";
 import { Toaster, toast } from "sonner";
-import type { AgentId, AgentPayload, ProviderRecord } from "@shared/types";
+import type {
+  AgentId,
+  AgentPayload,
+  PromptRecord,
+  ProviderRecord,
+} from "@shared/types";
 import { AgentRail } from "@/components/AgentRail";
 import { LoginScreen } from "@/components/LoginScreen";
+import { PromptEditorModal } from "@/components/PromptEditorModal";
+import { PromptPanel } from "@/components/PromptPanel";
 import { ProviderEditorModal } from "@/components/ProviderEditorModal";
 import { ProviderGrid } from "@/components/ProviderGrid";
 import {
+  activatePrompt,
   activateProvider,
+  createPrompt,
   createProvider,
   fetchAgent,
   getSession,
   login,
   logout,
+  removePrompt,
   removeProvider,
+  updatePrompt,
   updateProvider,
 } from "@/lib/api";
 import {
@@ -28,6 +39,11 @@ import {
   draftToProvider,
   type ProviderEditorDraft,
 } from "@/lib/provider-helpers";
+import {
+  createPromptDraft,
+  draftToPrompt,
+  type PromptEditorDraft,
+} from "@/lib/prompt-helpers";
 
 type SessionState = "checking" | "guest" | "ready";
 
@@ -43,21 +59,39 @@ type EditorState =
       draft: ProviderEditorDraft;
     };
 
+type PromptModalState =
+  | {
+      open: false;
+      mode: "create" | "edit";
+      draft: null;
+    }
+  | {
+      open: true;
+      mode: "create" | "edit";
+      draft: PromptEditorDraft;
+    };
+
 const EMPTY_AGENT_PAYLOAD: Record<AgentId, AgentPayload> = {
   claude: {
     agent: "claude",
     providers: [],
     currentProviderId: "",
+    prompts: [],
+    currentPromptId: "",
   },
   codex: {
     agent: "codex",
     providers: [],
     currentProviderId: "",
+    prompts: [],
+    currentPromptId: "",
   },
   gemini: {
     agent: "gemini",
     providers: [],
     currentProviderId: "",
+    prompts: [],
+    currentPromptId: "",
   },
 };
 
@@ -121,8 +155,16 @@ function AppShell(): ReactNode {
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
+  const [isSavingProvider, setIsSavingProvider] = useState(false);
+  const [promptSwitchingId, setPromptSwitchingId] = useState<string | null>(null);
+  const [promptDeletingId, setPromptDeletingId] = useState<string | null>(null);
+  const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [editorState, setEditorState] = useState<EditorState>({
+    open: false,
+    mode: "create",
+    draft: null,
+  });
+  const [promptEditorState, setPromptEditorState] = useState<PromptModalState>({
     open: false,
     mode: "create",
     draft: null,
@@ -222,6 +264,30 @@ function AppShell(): ReactNode {
     });
   };
 
+  const openCreatePromptModal = () => {
+    setPromptEditorState({
+      open: true,
+      mode: "create",
+      draft: createPromptDraft(),
+    });
+  };
+
+  const openEditPromptModal = (prompt: PromptRecord) => {
+    setPromptEditorState({
+      open: true,
+      mode: "edit",
+      draft: createPromptDraft(prompt),
+    });
+  };
+
+  const closePromptEditor = () => {
+    setPromptEditorState({
+      open: false,
+      mode: "create",
+      draft: null,
+    });
+  };
+
   const updateAgentPayload = (agent: AgentId, payload: AgentPayload) => {
     setAgents((current) => ({
       ...current,
@@ -230,7 +296,7 @@ function AppShell(): ReactNode {
   };
 
   const handleSaveProvider = async (draft: ProviderEditorDraft) => {
-    setIsSaving(true);
+    setIsSavingProvider(true);
 
     try {
       const provider = draftToProvider(activeAgent, draft);
@@ -246,7 +312,28 @@ function AppShell(): ReactNode {
       const message = error instanceof Error ? error.message : "保存失败";
       toast.error(message);
     } finally {
-      setIsSaving(false);
+      setIsSavingProvider(false);
+    }
+  };
+
+  const handleSavePrompt = async (draft: PromptEditorDraft) => {
+    setIsSavingPrompt(true);
+
+    try {
+      const prompt = draftToPrompt(draft);
+      const payload =
+        promptEditorState.mode === "create"
+          ? await createPrompt(activeAgent, prompt)
+          : await updatePrompt(activeAgent, prompt);
+
+      updateAgentPayload(activeAgent, payload);
+      closePromptEditor();
+      toast.success(promptEditorState.mode === "create" ? "提示词已创建" : "提示词已更新");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存失败";
+      toast.error(message);
+    } finally {
+      setIsSavingPrompt(false);
     }
   };
 
@@ -290,6 +377,46 @@ function AppShell(): ReactNode {
     }
   };
 
+  const handleSwitchPrompt = async (prompt: PromptRecord) => {
+    const previous = activePayload;
+    setPromptSwitchingId(prompt.id);
+    updateAgentPayload(activeAgent, {
+      ...activePayload,
+      currentPromptId: prompt.id,
+    });
+
+    try {
+      const payload = await activatePrompt(activeAgent, prompt.id);
+      updateAgentPayload(activeAgent, payload);
+      toast.success(`已激活 ${prompt.name}`);
+    } catch (error) {
+      updateAgentPayload(activeAgent, previous);
+      const message = error instanceof Error ? error.message : "切换失败";
+      toast.error(message);
+    } finally {
+      setPromptSwitchingId(null);
+    }
+  };
+
+  const handleDeletePrompt = async (prompt: PromptRecord) => {
+    const confirmed = window.confirm(`确认删除提示词 "${prompt.name}" 吗？`);
+    if (!confirmed) {
+      return;
+    }
+
+    setPromptDeletingId(prompt.id);
+    try {
+      const payload = await removePrompt(activeAgent, prompt.id);
+      updateAgentPayload(activeAgent, payload);
+      toast.success("提示词已删除");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除失败";
+      toast.error(message);
+    } finally {
+      setPromptDeletingId(null);
+    }
+  };
+
   if (sessionState === "checking") {
     return <LoadingScreen />;
   }
@@ -327,16 +454,29 @@ function AppShell(): ReactNode {
             {isLoadingAgents ? (
               <LoadingScreen />
             ) : (
-              <ProviderGrid
-                agent={activeAgent}
-                payload={activePayload}
-                switchingId={switchingId}
-                deletingId={deletingId}
-                onAdd={openCreateModal}
-                onEdit={openEditModal}
-                onSwitch={handleSwitchProvider}
-                onDelete={handleDeleteProvider}
-              />
+              <div className="workspace-stack">
+                <ProviderGrid
+                  agent={activeAgent}
+                  payload={activePayload}
+                  switchingId={switchingId}
+                  deletingId={deletingId}
+                  onAdd={openCreateModal}
+                  onEdit={openEditModal}
+                  onSwitch={handleSwitchProvider}
+                  onDelete={handleDeleteProvider}
+                />
+
+                <PromptPanel
+                  agent={activeAgent}
+                  payload={activePayload}
+                  switchingId={promptSwitchingId}
+                  deletingId={promptDeletingId}
+                  onAdd={openCreatePromptModal}
+                  onEdit={openEditPromptModal}
+                  onSwitch={handleSwitchPrompt}
+                  onDelete={handleDeletePrompt}
+                />
+              </div>
             )}
           </div>
         </div>
@@ -347,9 +487,19 @@ function AppShell(): ReactNode {
         open={editorState.open}
         mode={editorState.mode}
         initialDraft={editorState.draft}
-        isSaving={isSaving}
+        isSaving={isSavingProvider}
         onClose={closeEditor}
         onSave={handleSaveProvider}
+      />
+
+      <PromptEditorModal
+        agent={activeAgent}
+        open={promptEditorState.open}
+        mode={promptEditorState.mode}
+        initialDraft={promptEditorState.draft}
+        isSaving={isSavingPrompt}
+        onClose={closePromptEditor}
+        onSave={handleSavePrompt}
       />
 
       <Toaster richColors position="top-right" />

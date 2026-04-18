@@ -10,6 +10,8 @@ export interface AuditEvent {
   agent?: string;
   providerId?: string;
   providerName?: string;
+  promptId?: string;
+  promptName?: string;
   detail?: string;
   success?: boolean;
 }

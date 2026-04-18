@@ -12,10 +12,15 @@
 - 读取并兼容 `~/.cc-switch/config.json`
 - 兼容 `~/.cc-switch/settings.json` 中的 `claudeConfigDir` / `codexConfigDir` / `geminiConfigDir` 覆盖目录
 - 读取并导入 live 配置作为默认 provider
+- 读取并导入 live 提示词作为默认 prompt
 - 新建 / 编辑 / 删除 provider
+- 新建 / 编辑 / 删除 prompt
 - 在同一 agent 下切换 provider
+- 在同一 agent 下切换 prompt
 - 切换时同步写入对应 live 配置文件
+- 切换时同步写入对应 live prompt 文件
 - live 配置切换前自动备份到 `~/.cc-switch/backups/live`
+- prompt 切换前会先回填当前 live Markdown，再写入下一个 prompt
 - live 写入失败自动回滚
 - 登录限流、审计日志、安全响应头、Origin 校验
 
@@ -31,10 +36,13 @@
 
 - `~/.cc-switch/config.json`
 - `~/.claude/settings.json`
+- `~/.claude/CLAUDE.md`
 - `~/.codex/auth.json`
 - `~/.codex/config.toml`
+- `~/.codex/AGENTS.md`
 - `~/.gemini/.env`
 - `~/.gemini/settings.json`
+- `~/.gemini/GEMINI.md`
 
 ## 开发
 

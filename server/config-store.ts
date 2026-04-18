@@ -6,6 +6,7 @@ import type {
   AgentConfig,
   AgentId,
   AgentPayload,
+  PromptRecord,
   ProviderCategory,
   ProviderRecord,
   SwitchConfigFile,
@@ -45,6 +46,9 @@ interface BackupMetadata {
   fromProviderId?: string;
   toProviderId?: string;
   providerName?: string;
+  fromPromptId?: string;
+  toPromptId?: string;
+  promptName?: string;
 }
 
 let mutationChain: Promise<void> = Promise.resolve();
@@ -60,6 +64,24 @@ function withMutationLock<T>(operation: () => Promise<T>): Promise<T> {
 
 function sortProviders(providers: Record<string, ProviderRecord>): ProviderRecord[] {
   return Object.values(providers).sort((left, right) => {
+    const leftSort = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
+    const rightSort = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
+    if (leftSort !== rightSort) {
+      return leftSort - rightSort;
+    }
+
+    const leftCreated = left.createdAt ?? 0;
+    const rightCreated = right.createdAt ?? 0;
+    if (leftCreated !== rightCreated) {
+      return leftCreated - rightCreated;
+    }
+
+    return left.name.localeCompare(right.name, "zh-CN");
+  });
+}
+
+function sortPrompts(prompts: Record<string, PromptRecord>): PromptRecord[] {
+  return Object.values(prompts).sort((left, right) => {
     const leftSort = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
     const rightSort = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
     if (leftSort !== rightSort) {
@@ -173,6 +195,28 @@ function normalizeProvider(agent: AgentId, provider: ProviderRecord): ProviderRe
   return normalized;
 }
 
+function normalizePrompt(prompt: PromptRecord): PromptRecord {
+  const name = prompt.name.trim();
+  if (!name) {
+    throw new Error("提示词名称不能为空");
+  }
+
+  if (typeof prompt.content !== "string") {
+    throw new Error("提示词内容必须是字符串");
+  }
+
+  return {
+    id: prompt.id || crypto.randomUUID(),
+    name,
+    content: prompt.content,
+    createdAt: prompt.createdAt ?? Date.now(),
+    sortIndex:
+      typeof prompt.sortIndex === "number" && Number.isFinite(prompt.sortIndex)
+        ? prompt.sortIndex
+        : undefined,
+  };
+}
+
 async function readFileIfExists(filePath: string): Promise<string | null> {
   try {
     return await fs.readFile(filePath, "utf8");
@@ -233,6 +277,8 @@ function createEmptyAgentConfig(): AgentConfig {
   return {
     providers: {},
     current: "",
+    prompts: {},
+    currentPrompt: "",
   };
 }
 
@@ -241,6 +287,8 @@ function ensureConfigShape(config: SwitchConfigFile): SwitchConfigFile {
     config[agent] ??= createEmptyAgentConfig();
     config[agent]!.providers ??= {};
     config[agent]!.current ??= "";
+    config[agent]!.prompts ??= {};
+    config[agent]!.currentPrompt ??= "";
   }
   return config;
 }
@@ -285,6 +333,21 @@ async function getGeminiSettingsPath(): Promise<string> {
   return path.join(await getConfigDir("gemini"), "settings.json");
 }
 
+async function getPromptPath(agent: AgentId): Promise<string> {
+  const fileName = (() => {
+    switch (agent) {
+      case "claude":
+        return "CLAUDE.md";
+      case "codex":
+        return "AGENTS.md";
+      case "gemini":
+        return "GEMINI.md";
+    }
+  })();
+
+  return path.join(await getConfigDir(agent), fileName);
+}
+
 async function resolveLiveFilePaths(agent: AgentId): Promise<string[]> {
   switch (agent) {
     case "claude":
@@ -320,6 +383,24 @@ async function restoreLiveSnapshot(snapshot: LiveSnapshot): Promise<void> {
     }
     await writeTextAtomic(artifact.path, artifact.content);
   }
+}
+
+async function capturePromptSnapshot(agent: AgentId): Promise<LiveSnapshot> {
+  const promptPath = await getPromptPath(agent);
+  return {
+    agent,
+    capturedAt: new Date().toISOString(),
+    files: [
+      {
+        path: promptPath,
+        content: await readFileIfExists(promptPath),
+      },
+    ],
+  };
+}
+
+async function readLivePrompt(agent: AgentId): Promise<string | null> {
+  return readFileIfExists(await getPromptPath(agent));
 }
 
 async function pruneLiveBackups(agent: AgentId): Promise<void> {
@@ -490,6 +571,14 @@ async function buildLiveArtifacts(
   }
 }
 
+async function writeLivePrompt(agent: AgentId, prompt: PromptRecord): Promise<void> {
+  await writeTextAtomic(await getPromptPath(agent), prompt.content);
+}
+
+async function clearLivePrompt(agent: AgentId): Promise<void> {
+  await deleteFileIfExists(await getPromptPath(agent));
+}
+
 async function writeLiveProvider(
   agent: AgentId,
   provider: ProviderRecord,
@@ -537,7 +626,39 @@ async function commitConfigAndMaybeLive(params: {
   }
 }
 
-async function bootstrapAgent(config: SwitchConfigFile, agent: AgentId): Promise<boolean> {
+async function commitConfigAndMaybePrompt(params: {
+  agent: AgentId;
+  config: SwitchConfigFile;
+  livePrompt?: PromptRecord;
+  clearLive?: boolean;
+  backup: BackupMetadata;
+}): Promise<void> {
+  const snapshot =
+    params.livePrompt || params.clearLive ? await capturePromptSnapshot(params.agent) : null;
+
+  if (snapshot) {
+    await persistLiveBackup(snapshot, params.backup);
+  }
+
+  try {
+    if (params.livePrompt) {
+      await writeLivePrompt(params.agent, params.livePrompt);
+    } else if (params.clearLive) {
+      await clearLivePrompt(params.agent);
+    }
+    await saveConfigFile(params.config);
+  } catch (error) {
+    if (snapshot) {
+      await restoreLiveSnapshot(snapshot);
+    }
+    throw error;
+  }
+}
+
+async function bootstrapProviders(
+  config: SwitchConfigFile,
+  agent: AgentId,
+): Promise<boolean> {
   const manager = config[agent] ?? createEmptyAgentConfig();
   config[agent] = manager;
 
@@ -562,11 +683,52 @@ async function bootstrapAgent(config: SwitchConfigFile, agent: AgentId): Promise
   return true;
 }
 
+async function bootstrapPrompts(
+  config: SwitchConfigFile,
+  agent: AgentId,
+): Promise<boolean> {
+  const manager = config[agent] ?? createEmptyAgentConfig();
+  config[agent] = manager;
+
+  if (Object.keys(manager.prompts).length > 0) {
+    return false;
+  }
+
+  const livePrompt = await readLivePrompt(agent);
+  if (livePrompt === null) {
+    return false;
+  }
+
+  manager.prompts.default = {
+    id: "default",
+    name: "default",
+    content: livePrompt,
+    createdAt: Date.now(),
+    sortIndex: 0,
+  };
+  manager.currentPrompt = "default";
+  return true;
+}
+
+async function bootstrapAgentState(
+  config: SwitchConfigFile,
+  agent: AgentId,
+): Promise<boolean> {
+  const [providersBootstrapped, promptsBootstrapped] = await Promise.all([
+    bootstrapProviders(config, agent),
+    bootstrapPrompts(config, agent),
+  ]);
+
+  return providersBootstrapped || promptsBootstrapped;
+}
+
 function serializeAgent(manager: AgentConfig, agent: AgentId): AgentPayload {
   return {
     agent,
     providers: sortProviders(manager.providers),
     currentProviderId: manager.current,
+    prompts: sortPrompts(manager.prompts),
+    currentPromptId: manager.currentPrompt,
   };
 }
 
@@ -574,20 +736,23 @@ async function getAgentStateFromConfig(
   config: SwitchConfigFile,
   agent: AgentId,
 ): Promise<AgentPayload> {
-  await bootstrapAgent(config, agent);
+  await bootstrapAgentState(config, agent);
   return serializeAgent(config[agent] ?? createEmptyAgentConfig(), agent);
 }
 
 export async function listAgent(agent: AgentId): Promise<AgentPayload> {
   const config = await readConfigFile();
   const existingManager = config[agent] ?? createEmptyAgentConfig();
-  if (Object.keys(existingManager.providers).length > 0) {
+  if (
+    Object.keys(existingManager.providers).length > 0 &&
+    Object.keys(existingManager.prompts).length > 0
+  ) {
     return serializeAgent(existingManager, agent);
   }
 
   return withMutationLock(async () => {
     const lockedConfig = await readConfigFile();
-    const bootstrapped = await bootstrapAgent(lockedConfig, agent);
+    const bootstrapped = await bootstrapAgentState(lockedConfig, agent);
     const payload = serializeAgent(
       lockedConfig[agent] ?? createEmptyAgentConfig(),
       agent,
@@ -605,7 +770,7 @@ export async function saveProvider(
 ): Promise<AgentPayload> {
   return withMutationLock(async () => {
     const config = await readConfigFile();
-    await bootstrapAgent(config, agent);
+    await bootstrapAgentState(config, agent);
 
     const manager = config[agent] ?? createEmptyAgentConfig();
     const isNew = !manager.providers[providerInput.id];
@@ -646,7 +811,7 @@ export async function deleteProvider(
 ): Promise<AgentPayload> {
   return withMutationLock(async () => {
     const config = await readConfigFile();
-    await bootstrapAgent(config, agent);
+    await bootstrapAgentState(config, agent);
 
     const manager = config[agent] ?? createEmptyAgentConfig();
     const existing = manager.providers[providerId];
@@ -689,7 +854,7 @@ export async function switchProvider(
 ): Promise<AgentPayload> {
   return withMutationLock(async () => {
     const config = await readConfigFile();
-    await bootstrapAgent(config, agent);
+    await bootstrapAgentState(config, agent);
 
     const manager = config[agent] ?? createEmptyAgentConfig();
     const nextProvider = manager.providers[providerId];
@@ -721,6 +886,133 @@ export async function switchProvider(
         fromProviderId: currentProviderId || undefined,
         toProviderId: providerId,
         providerName: nextProvider.name,
+      },
+    });
+
+    return serializeAgent(manager, agent);
+  });
+}
+
+export async function savePrompt(
+  agent: AgentId,
+  promptInput: PromptRecord,
+): Promise<AgentPayload> {
+  return withMutationLock(async () => {
+    const config = await readConfigFile();
+    await bootstrapAgentState(config, agent);
+
+    const manager = config[agent] ?? createEmptyAgentConfig();
+    const isNew = !manager.prompts[promptInput.id];
+    const normalized = normalizePrompt(promptInput);
+    if (isNew && normalized.sortIndex === undefined) {
+      normalized.sortIndex = sortPrompts(manager.prompts).length;
+    }
+
+    manager.prompts[normalized.id] = normalized;
+    config[agent] = manager;
+
+    let livePrompt: PromptRecord | undefined;
+    if (!manager.currentPrompt) {
+      manager.currentPrompt = normalized.id;
+      livePrompt = normalized;
+    } else if (manager.currentPrompt === normalized.id) {
+      livePrompt = normalized;
+    }
+
+    await commitConfigAndMaybePrompt({
+      agent,
+      config,
+      livePrompt,
+      backup: {
+        reason: livePrompt ? "prompt-save-current" : "prompt-save-library",
+        toPromptId: normalized.id,
+        promptName: normalized.name,
+      },
+    });
+
+    return serializeAgent(manager, agent);
+  });
+}
+
+export async function deletePrompt(
+  agent: AgentId,
+  promptId: string,
+): Promise<AgentPayload> {
+  return withMutationLock(async () => {
+    const config = await readConfigFile();
+    await bootstrapAgentState(config, agent);
+
+    const manager = config[agent] ?? createEmptyAgentConfig();
+    const existing = manager.prompts[promptId];
+    if (!existing) {
+      throw new Error("提示词不存在");
+    }
+
+    const wasCurrent = manager.currentPrompt === promptId;
+    delete manager.prompts[promptId];
+
+    let livePrompt: PromptRecord | undefined;
+    let clearLive = false;
+    if (wasCurrent) {
+      const nextPrompt = sortPrompts(manager.prompts)[0];
+      manager.currentPrompt = nextPrompt?.id ?? "";
+      livePrompt = nextPrompt;
+      clearLive = !nextPrompt;
+    }
+
+    await commitConfigAndMaybePrompt({
+      agent,
+      config,
+      livePrompt,
+      clearLive,
+      backup: {
+        reason: wasCurrent ? "prompt-delete-current" : "prompt-delete-library",
+        fromPromptId: promptId,
+        toPromptId: livePrompt?.id,
+        promptName: existing.name,
+      },
+    });
+
+    return serializeAgent(manager, agent);
+  });
+}
+
+export async function switchPrompt(
+  agent: AgentId,
+  promptId: string,
+): Promise<AgentPayload> {
+  return withMutationLock(async () => {
+    const config = await readConfigFile();
+    await bootstrapAgentState(config, agent);
+
+    const manager = config[agent] ?? createEmptyAgentConfig();
+    const nextPrompt = manager.prompts[promptId];
+    if (!nextPrompt) {
+      throw new Error("提示词不存在");
+    }
+
+    const currentPromptId = manager.currentPrompt;
+    const previousLivePrompt =
+      currentPromptId && currentPromptId !== promptId ? await readLivePrompt(agent) : null;
+
+    if (previousLivePrompt !== null && manager.prompts[currentPromptId]) {
+      manager.prompts[currentPromptId] = {
+        ...manager.prompts[currentPromptId],
+        content: previousLivePrompt,
+      };
+    }
+
+    manager.currentPrompt = promptId;
+
+    await commitConfigAndMaybePrompt({
+      agent,
+      config,
+      livePrompt: nextPrompt,
+      backup: {
+        reason: "prompt-switch",
+        fromPromptId: currentPromptId || undefined,
+        toPromptId: promptId,
+        promptName: nextPrompt.name,
       },
     });
 

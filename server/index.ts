@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentId, ProviderRecord } from "../shared/types.js";
+import type { AgentId, PromptRecord, ProviderRecord } from "../shared/types.js";
 import { appendAuditEvent } from "./audit.js";
 import {
   checkLoginRateLimit,
@@ -14,9 +14,12 @@ import {
   verifyPassword,
 } from "./auth.js";
 import {
+  deletePrompt,
   deleteProvider,
   listAgent,
+  savePrompt,
   saveProvider,
+  switchPrompt,
   switchProvider,
 } from "./config-store.js";
 
@@ -55,6 +58,14 @@ function getProviderFromBody(request: Request): ProviderRecord {
     throw new Error("缺少 provider 数据");
   }
   return provider as ProviderRecord;
+}
+
+function getPromptFromBody(request: Request): PromptRecord {
+  const prompt = request.body?.prompt;
+  if (!prompt || typeof prompt !== "object" || Array.isArray(prompt)) {
+    throw new Error("缺少 prompt 数据");
+  }
+  return prompt as PromptRecord;
 }
 
 function getClientOrigin(request: Request): string | null {
@@ -347,6 +358,116 @@ app.post(
     } catch (error) {
       await appendAuditEvent({
         type: "provider_switch",
+        success: false,
+        detail: error instanceof Error ? error.message : "unknown",
+        ...auditContext,
+      }).catch(() => undefined);
+      sendError(response, error);
+    }
+  },
+);
+
+app.post("/api/agents/:agent/prompts", requireAuth, async (request, response) => {
+  const auditContext = buildAuditContext(request);
+  try {
+    const agent = getAgentId(request);
+    const prompt = getPromptFromBody(request);
+    const payload = await savePrompt(agent, prompt);
+    response.json(payload);
+    await appendAuditEvent({
+      type: "prompt_save",
+      success: true,
+      agent,
+      promptId: prompt.id,
+      promptName: prompt.name,
+      ...auditContext,
+    }).catch(() => undefined);
+  } catch (error) {
+    await appendAuditEvent({
+      type: "prompt_save",
+      success: false,
+      detail: error instanceof Error ? error.message : "unknown",
+      ...auditContext,
+    }).catch(() => undefined);
+    sendError(response, error);
+  }
+});
+
+app.put("/api/agents/:agent/prompts/:id", requireAuth, async (request, response) => {
+  const auditContext = buildAuditContext(request);
+  try {
+    const agent = getAgentId(request);
+    const prompt = getPromptFromBody(request);
+    const promptId = getSingleParam(request.params.id, "prompt");
+    if (prompt.id !== promptId) {
+      throw new Error("Prompt ID 不一致");
+    }
+    const payload = await savePrompt(agent, prompt);
+    response.json(payload);
+    await appendAuditEvent({
+      type: "prompt_update",
+      success: true,
+      agent,
+      promptId: prompt.id,
+      promptName: prompt.name,
+      ...auditContext,
+    }).catch(() => undefined);
+  } catch (error) {
+    await appendAuditEvent({
+      type: "prompt_update",
+      success: false,
+      detail: error instanceof Error ? error.message : "unknown",
+      ...auditContext,
+    }).catch(() => undefined);
+    sendError(response, error);
+  }
+});
+
+app.delete("/api/agents/:agent/prompts/:id", requireAuth, async (request, response) => {
+  const auditContext = buildAuditContext(request);
+  try {
+    const agent = getAgentId(request);
+    const promptId = getSingleParam(request.params.id, "prompt");
+    const payload = await deletePrompt(agent, promptId);
+    response.json(payload);
+    await appendAuditEvent({
+      type: "prompt_delete",
+      success: true,
+      agent,
+      promptId,
+      ...auditContext,
+    }).catch(() => undefined);
+  } catch (error) {
+    await appendAuditEvent({
+      type: "prompt_delete",
+      success: false,
+      detail: error instanceof Error ? error.message : "unknown",
+      ...auditContext,
+    }).catch(() => undefined);
+    sendError(response, error);
+  }
+});
+
+app.post(
+  "/api/agents/:agent/prompts/:id/switch",
+  requireAuth,
+  async (request, response) => {
+    const auditContext = buildAuditContext(request);
+    try {
+      const agent = getAgentId(request);
+      const promptId = getSingleParam(request.params.id, "prompt");
+      const payload = await switchPrompt(agent, promptId);
+      response.json(payload);
+      await appendAuditEvent({
+        type: "prompt_switch",
+        success: true,
+        agent,
+        promptId,
+        ...auditContext,
+      }).catch(() => undefined);
+    } catch (error) {
+      await appendAuditEvent({
+        type: "prompt_switch",
         success: false,
         detail: error instanceof Error ? error.message : "unknown",
         ...auditContext,
